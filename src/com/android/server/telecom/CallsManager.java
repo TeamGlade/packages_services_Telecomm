@@ -37,11 +37,6 @@ import android.telecom.VideoProfile;
 import android.telephony.PhoneNumberUtils;
 import android.telephony.TelephonyManager;
 
-import com.android.internal.telephony.CallStateException;
-import com.android.internal.telephony.CallerInfo;
-import com.android.internal.telephony.Connection;
-import com.android.internal.telephony.TelephonyProperties;
-import com.android.internal.telephony.util.BlacklistUtils;
 import com.android.internal.util.IndentingPrintWriter;
 
 import java.util.Collection;
@@ -130,7 +125,6 @@ public final class CallsManager extends Call.ListenerBase {
     private final Context mContext;
     private final PhoneAccountRegistrar mPhoneAccountRegistrar;
     private final MissedCallNotifier mMissedCallNotifier;
-    private final BlacklistCallNotifier mBlacklistCallNotifier;
     private final Set<Call> mLocallyDisconnectingCalls = new HashSet<>();
     private final Set<Call> mPendingCallsToDisconnect = new HashSet<>();
     /* Handler tied to thread in which CallManager was initialized. */
@@ -164,12 +158,10 @@ public final class CallsManager extends Call.ListenerBase {
      * Initializes the required Telecom components.
      */
      CallsManager(Context context, MissedCallNotifier missedCallNotifier,
-                  BlacklistCallNotifier blacklistCallNotifier,
-                  PhoneAccountRegistrar phoneAccountRegistrar) {
+             PhoneAccountRegistrar phoneAccountRegistrar) {
         mContext = context;
         mPhoneAccountRegistrar = phoneAccountRegistrar;
         mMissedCallNotifier = missedCallNotifier;
-        mBlacklistCallNotifier = blacklistCallNotifier;
         StatusBarNotifier statusBarNotifier = new StatusBarNotifier(context, this);
         mWiredHeadsetManager = new WiredHeadsetManager(context);
         mCallAudioManager = new CallAudioManager(context, statusBarNotifier, mWiredHeadsetManager);
@@ -230,20 +222,16 @@ public final class CallsManager extends Call.ListenerBase {
     @Override
     public void onSuccessfulIncomingCall(Call incomingCall) {
         Log.d(this, "onSuccessfulIncomingCall");
+        setCallState(incomingCall, CallState.RINGING);
 
-        if (isCallBlacklisted(incomingCall)) {
-            mCallLogManager.logCall(incomingCall, Calls.BLACKLIST_TYPE);
+        if (hasMaximumRingingCalls()) {
+            incomingCall.reject(false, null);
+            // since the call was not added to the list of calls, we have to call the missed
+            // call notifier and the call logger manually.
+            mMissedCallNotifier.showMissedCallNotification(incomingCall);
+            mCallLogManager.logCall(incomingCall, Calls.MISSED_TYPE);
         } else {
-            setCallState(incomingCall, CallState.RINGING);
-            if (hasMaximumRingingCalls()) {
-                incomingCall.reject(false, null);
-                // since the call was not added to the list of calls, we have to call the missed
-                // call notifier and the call logger manually.
-                mMissedCallNotifier.showMissedCallNotification(incomingCall);
-                mCallLogManager.logCall(incomingCall, Calls.MISSED_TYPE);
-            } else {
-                addCall(incomingCall);
-            }
+            addCall(incomingCall);
         }
     }
 
@@ -1105,14 +1093,6 @@ public final class CallsManager extends Call.ListenerBase {
     }
 
     /**
-     * Retrieves the {@link MissedCallNotifier}
-     * @return The {@link MissedCallNotifier}.
-     */
-    BlacklistCallNotifier getBlacklistCallNotifier() {
-        return mBlacklistCallNotifier;
-    }
-
-    /**
      * Adds the specified call to the main list of live calls.
      *
      * @param call The call to add.
@@ -1479,20 +1459,5 @@ public final class CallsManager extends Call.ListenerBase {
             mConnectionServiceRepository.dump(pw);
             pw.decreaseIndent();
         }
-    }
-
-    protected boolean isCallBlacklisted(Call c) {
-        final String number = c.getCallerInfo().phoneNumber;
-        // See if the number is in the blacklist
-        // Result is one of: MATCH_NONE, MATCH_LIST or MATCH_REGEX
-        int listType = BlacklistUtils.isListed(mContext, number, BlacklistUtils.BLOCK_CALLS);
-        if (listType != BlacklistUtils.MATCH_NONE) {
-            // We have a match, set the user and hang up the call and notify
-            Log.d(this, "Incoming call from " + number + " blocked.");
-            mBlacklistCallNotifier.notifyBlacklistedCall(number,
-                    c.getCreationTimeMillis(), listType);
-            return true;
-        }
-        return false;
     }
 }
